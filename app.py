@@ -1,4 +1,4 @@
-# app.py - Full Flask API for Railway deployment
+# app.py - Fixed syntax error in dictionary
 from flask import Flask, request, jsonify
 import requests, re, json, time, random, string, secrets, hashlib, base64, urllib3
 from urllib.parse import quote, urlparse
@@ -387,7 +387,7 @@ def home():
         "version": "1.0",
         "endpoints": {
             "/test": "Test a card with GET parameters",
-            "/test?cc=xxxx|mm|yy|cvv&site=url&proxy=host:port:user:pass"
+            "/test": "?cc=xxxx|mm|yy|cvv&site=url&proxy=host:port:user:pass"
         },
         "example": "/test?cc=4342562526966146|08|2029|292&site=https://razorpay.me/@tpstech&proxy=jp-tok.pvdata.host:8080:g2rTXpNfPdcw2fzGtWKp62yH:nizar1elad2",
         "status": "operational"
