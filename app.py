@@ -1,7 +1,7 @@
-# app.py - Full Flask API with redirect URL capture
+# app.py - Enhanced redirect URL extraction
 from flask import Flask, request, jsonify
 import requests, re, json, time, random, string, secrets, hashlib, base64, urllib3
-from urllib.parse import quote, urlparse, parse_qs
+from urllib.parse import quote, urlparse, parse_qs, unquote
 import os
 
 urllib3.disable_warnings()
@@ -46,31 +46,86 @@ def find_between(content, start, end):
     except ValueError:
         return ""
 
-def extract_redirect_url(html_content):
-    """Extract 3DS redirect URL from HTML response"""
-    # Look for window.location.href
-    redirect_match = re.search(r'window\.location\.href\s*=\s*["\']([^"\']+)["\']', html_content)
-    if redirect_match:
-        return redirect_match.group(1)
+def extract_redirect_url_enhanced(html_content):
+    """Enhanced extraction of 3DS redirect URL from HTML response"""
     
-    # Look for meta refresh
-    meta_match = re.search(r'<meta\s+http-equiv=["\']refresh["\']\s+content=["\'][^"\']+url=([^"\']+)["\']', html_content, re.IGNORECASE)
+    # Pattern 1: window.location.href
+    patterns = [
+        r'window\.location\.href\s*=\s*["\']([^"\']+)["\']',
+        r'window\.location\.replace\s*\(["\']([^"\']+)["\']\)',
+        r'window\.location\.assign\s*\(["\']([^"\']+)["\']\)',
+        r'location\.href\s*=\s*["\']([^"\']+)["\']',
+        r'document\.location\s*=\s*["\']([^"\']+)["\']',
+        r'top\.location\s*=\s*["\']([^"\']+)["\']',
+        r'parent\.location\s*=\s*["\']([^"\']+)["\']',
+        r'self\.location\s*=\s*["\']([^"\']+)["\']',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, html_content, re.IGNORECASE)
+        if match:
+            url = match.group(1)
+            # Decode HTML entities
+            url = url.replace('&amp;', '&').replace('&#39;', "'")
+            return url
+    
+    # Pattern 2: Meta refresh
+    meta_match = re.search(r'<meta\s+http-equiv=["\']refresh["\']\s+content=["\'][^"\']*url=([^"\']+)["\']', html_content, re.IGNORECASE)
     if meta_match:
         return meta_match.group(1)
     
-    # Look for form action
+    # Pattern 3: Form action
     form_match = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
     if form_match:
         return form_match.group(1)
     
-    # Look for any HTTPS URL in the HTML
-    url_pattern = re.compile(r'https?://[^\s"\'<>]+')
-    urls = url_pattern.findall(html_content)
-    if urls:
-        # Filter out Razorpay CDN URLs, keep the bank redirect
-        for url in urls:
-            if 'razorpay' not in url and 'cdn' not in url and 'google' not in url:
+    # Pattern 4: Iframe src
+    iframe_match = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+    if iframe_match:
+        return iframe_match.group(1)
+    
+    # Pattern 5: JavaScript variables with URL
+    var_patterns = [
+        r'var\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
+        r'var\s+redirectURL\s*=\s*["\']([^"\']+)["\']',
+        r'var\s+url\s*=\s*["\']([^"\']+)["\']',
+        r'var\s+redirect_uri\s*=\s*["\']([^"\']+)["\']',
+        r'let\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
+        r'const\s+redirectUrl\s*=\s*["\']([^"\']+)["\']',
+    ]
+    
+    for pattern in var_patterns:
+        match = re.search(pattern, html_content, re.IGNORECASE)
+        if match:
+            url = match.group(1)
+            if url.startswith('http'):
                 return url
+    
+    # Pattern 6: Look for any URL in the HTML that's not Razorpay/CDN
+    url_pattern = re.compile(r'https?://[^\s"\'<>(){}[\]]+')
+    urls = url_pattern.findall(html_content)
+    
+    # Filter URLs - look for bank/3ds domains
+    for url in urls:
+        # Skip Razorpay/CDN/Google/Fonts
+        if any(skip in url.lower() for skip in ['razorpay', 'cdn', 'google', 'font', 'gstatic', 'cloudflare']):
+            continue
+        # Look for 3ds or acs in URL
+        if '3ds' in url.lower() or 'acs' in url.lower() or 'auth' in url.lower():
+            return url
+    
+    # Pattern 7: Look for encoded redirect URL in script
+    encoded_match = re.search(r'redirect_url["\']?\s*[:=]\s*["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+    if encoded_match:
+        url = encoded_match.group(1)
+        # Try to decode if it's URL encoded
+        try:
+            decoded = unquote(url)
+            if decoded.startswith('http'):
+                return decoded
+        except:
+            pass
+        return url
     
     return None
 
@@ -94,7 +149,8 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
         "message": "Unknown error",
         "raw_json": None,
         "card": f"{cc[:6]}******{cc[-4:]}",
-        "redirect_url": None
+        "redirect_url": None,
+        "redirect_html": None
     }
     
     try:
@@ -350,20 +406,35 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             result["message"] = "3DS authentication required - card is live"
             result["raw_json"] = {"redirect": True, "message": "3DS OTP required"}
             
-            # Extract redirect URL
-            redirect_url = extract_redirect_url(resp_create.text)
+            # Store HTML for analysis
+            result["redirect_html"] = resp_create.text[:2000]  # First 2000 chars
+            
+            # Extract redirect URL with enhanced function
+            redirect_url = extract_redirect_url_enhanced(resp_create.text)
             if redirect_url:
                 result["redirect_url"] = redirect_url
                 result["raw_json"]["redirect_url"] = redirect_url
                 
-                # Try to extract payment ID from redirect URL or HTML
+                # Try to extract payment ID from redirect URL
                 payment_match = re.search(r'payment_id=([^&]+)', redirect_url)
                 if payment_match:
                     result["raw_json"]["payment_id"] = payment_match.group(1)
-            
-            # Save HTML for debugging if needed
-            # with open("3ds_response.html", "w") as f:
-            #     f.write(resp_create.text)
+            else:
+                # Try to extract from JavaScript using regex
+                js_pattern = r'("|\')redirectUrl("|\')\s*[:=]\s*("|\')([^"\']+)("|\')'
+                js_match = re.search(js_pattern, resp_create.text, re.IGNORECASE)
+                if js_match:
+                    result["redirect_url"] = js_match.group(4)
+                    result["raw_json"]["redirect_url"] = js_match.group(4)
+                
+                # Look for any URL with payment_id
+                url_pattern = re.compile(r'https?://[^\s"\'<>(){}[\]]+')
+                urls = url_pattern.findall(resp_create.text)
+                for url in urls:
+                    if 'payment_id' in url or 'pay_' in url:
+                        result["redirect_url"] = url
+                        result["raw_json"]["redirect_url"] = url
+                        break
             
             return result
         
@@ -416,7 +487,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
             result["raw_json"] = {"raw_response": resp_create.text[:500]}
             
             # Try to extract redirect URL from raw response
-            redirect_url = extract_redirect_url(resp_create.text)
+            redirect_url = extract_redirect_url_enhanced(resp_create.text)
             if redirect_url:
                 result["redirect_url"] = redirect_url
                 result["raw_json"]["redirect_url"] = redirect_url
@@ -434,7 +505,7 @@ def test_card_on_razorpay(cc, mm, yy, cvv, proxy_string=None):
 def home():
     return jsonify({
         "service": "Razorpay Card Tester API",
-        "version": "1.0",
+        "version": "1.1",
         "endpoints": {
             "test": "/test?cc=xxxx|mm|yy|cvv&site=url&proxy=host:port:user:pass"
         },
